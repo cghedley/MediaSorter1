@@ -1,34 +1,41 @@
 # 🎬 Media Sorter Pro
 
-A powerful, automated media organization tool with a modern GUI. It monitors your downloads folder and automatically sorts files into TV Shows, Movies, and Music folders using intelligent filename parsing and metadata APIs.
+A powerful, automated media organization tool featuring a modern GUI. Media Sorter Pro monitors your downloads folder in real-time and automatically moves files into organized TV Shows, Movies, and Music libraries using intelligent filename parsing and metadata APIs.
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Windows-win)
-![License: CC BY 4.0](https://img.shields.io/badge/License-CC_BY_4.0-lightgrey.svg)
+![License](https://img.shields.io/badge/License-MIT-green)
 
 ## ✨ Features
 
-* **Automated Monitoring:** Watches folders in real-time using `watchdog`.
-* **Intelligent Parsing:** Detects TV shows (S01E01), Movies (Year), and quality tags.
-* **Modern GUI:** Built with Python (Eel) and HTML/CSS/JS for a clean, dark-mode interface.
-* **Music Fingerprinting:** Uses **AcoustID** to identify music files even with bad filenames.
-* **Metadata APIs:** Integrates with TMDB, TVMaze, and MusicBrainz for accurate sorting.
-* **Safe Moves:** Checks for file stability (to avoid moving files currently downloading) and handles duplicates.
+* **Automated Monitoring:** Watches folders in real-time using `watchdog` – no manual scanning required.
+* **Intelligent Parsing:**
+    * Detects **TV Shows** (e.g., `S01E01`, `1x01`) and organizes them into `Show Name/Season XX/` folders.
+    * Detects **Movies** and extracts years to create `Movie Name (Year)` folders.
+    * Cleans junk tags (e.g., `1080p`, `x264`, `RARBG`) for clean filenames.
+* **Music Fingerprinting:** Uses **AcoustID** (audio fingerprinting) to identify music files even if filenames are garbled (requires FFmpeg).
+* **Modern GUI:** A clean, dark-mode interface built with HTML/JS and Python (`Eel`).
+* **Safe File Handling:**
+    * Prevents moving incomplete downloads by checking file stability.
+    * Handles duplicate files automatically.
+* **API Integration:** Connects to TMDB, TVMaze, and MusicBrainz for accurate metadata.
 
-## 🛠️ Installation
+## 🛠️ Installation & Setup
 
 ### Prerequisites
-* Python 3.8 or higher
-* **FFmpeg** (Required for Music Fingerprinting). [Download here](https://www.gyan.dev/ffmpeg/builds/) and add to your system PATH or place `ffmpeg.exe` in the root folder.
+1.  **Python 3.8+** installed.
+2.  **FFmpeg** (Required for music identification).
+    * [Download FFmpeg Essentials](https://www.gyan.dev/ffmpeg/builds/)
+    * Extract `ffmpeg.exe` and place it in the project root folder.
 
-### Setup
+### Installation
 1.  Clone the repository:
     ```bash
     git clone [https://github.com/yourusername/media-sorter-pro.git](https://github.com/yourusername/media-sorter-pro.git)
     cd media-sorter-pro
     ```
 
-2.  Install dependencies:
+2.  Install python dependencies:
     ```bash
     pip install -r requirements.txt
     ```
@@ -38,41 +45,42 @@ A powerful, automated media organization tool with a modern GUI. It monitors you
     python MediaSorter.py
     ```
 
-## 📦 Building for Windows (.exe)
+## 📦 Building a Standalone .EXE
 
-To create a standalone executable that runs without Python installed:
+To distribute this application as a single executable file for Windows users who don't have Python installed:
 
 1.  Install PyInstaller:
     ```bash
     pip install pyinstaller
     ```
 
-2.  Run the build command (PowerShell):
+2.  Run the build command (Note: this bundles the `web` folder inside the exe):
     ```powershell
     python -m PyInstaller --noconsole --onefile --add-data 'web;web' --icon=NONE MediaSorter.py
     ```
 
-3.  The executable will appear in the `dist/` folder.
-    * **Note:** If using Music features, copy `ffmpeg.exe` into the `dist/` folder next to your new executable.
+3.  **Important:** After building, navigate to the `dist/` folder and **copy `ffmpeg.exe`** into that folder. The EXE requires FFmpeg to sit next to it to process music files.
 
 ## ⚙️ Configuration
 
-The app uses a `sorter_config.json` file to store your preferences. You can configure these in the "Configuration" tab of the GUI:
+The application uses a `sorter_config.json` file to store settings. You can configure these easily via the GUI:
 
-* **Monitor Path:** Where files arrive (e.g., Downloads).
-* **Destination Paths:** Where files should go (TV, Movies, Music).
-* **API Keys (Optional):**
-    * **TMDB:** For movie posters and accurate metadata.
-    * **AcoustID:** For audio fingerprinting.
+| Setting | Description |
+| :--- | :--- |
+| **Monitor Folder** | The folder where new downloads arrive (e.g., `C:\Downloads`). |
+| **TV/Movie/Music** | Destination folders for sorted media. |
+| **API Keys** | (Optional) TMDB and AcoustID keys for higher accuracy. |
+| **AI Correction** | Enables online lookups to correct filenames (e.g., "bbt s01e01" -> "The Big Bang Theory"). |
 
 ## 📂 Project Structure
 
 ```text
 /
-├── MediaSorter.py       # Main Python logic
+├── MediaSorter.py       # Main Python backend logic
+├── sorter_config.json   # User configuration (auto-generated)
 ├── requirements.txt     # Python dependencies
-├── web/                 # GUI Source Code
+├── web/                 # GUI Frontend
 │   ├── index.html
 │   ├── main.js
 │   └── styles.css
-└── sorter_config.json   # User config (auto-generated)
+└── dist/                # Compiled .exe files appear here
