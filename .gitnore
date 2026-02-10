@@ -1,0 +1,28 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.env
+
+# Distribution / Build files
+dist/
+build/
+*.spec
+
+# User Configuration (Don't share your API keys!)
+sorter_config.json
+
+# IDE settings
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# System files
+Thumbs.db
+Desktop.ini
