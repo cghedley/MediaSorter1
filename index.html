@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Media Sorter Pro</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        /* Loading screen */
+        #loading-screen {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #0a0a0f;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            color: white;
+        }
+        
+        .spinner {
+            width: 50px; height: 50px;
+            border: 3px solid rgba(99, 102, 241, 0.3);
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .hidden { display: none !important; }
+
+        /* API Key Link Styling */
+        .api-label-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+        }
+        .get-key-link {
+            font-size: 0.75rem;
+            color: #6366f1;
+            text-decoration: none;
+        }
+        .get-key-link:hover { text-decoration: underline; }
+
+        /* FFmpeg Alert */
+        .ffmpeg-alert {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid #ef4444;
+            color: #fca5a5;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        .ffmpeg-alert a {
+            color: #fff;
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading-screen">
+        <div class="spinner"></div>
+        <div>Initializing Media Sorter Pro...</div>
+    </div>
+
+    <div id="app" class="hidden">
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <div class="logo-icon">🎬</div>
+                    <div class="logo-text">
+                        <h1>Media Sorter Pro</h1>
+                        <div id="connection-status" class="connection-status">
+                            <span class="status-dot"></span>
+                            <span class="status-text">Connecting...</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="header-controls">
+                    <div id="status-indicator" class="status-indicator">
+                        <div id="status-dot" class="status-dot idle"></div>
+                        <span id="status-text" class="status-text">Idle</span>
+                    </div>
+                    <button id="start-btn" class="btn btn-primary">
+                        ▶ Start Monitoring
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <div class="stats-container">
+            <div class="stat-card">
+                <div class="stat-icon tv">📺</div>
+                <div class="stat-info">
+                    <div id="stat-tv" class="stat-number">0</div>
+                    <div class="stat-label">TV Shows</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon movie">🎬</div>
+                <div class="stat-info">
+                    <div id="stat-movies" class="stat-number">0</div>
+                    <div class="stat-label">Movies</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon music">🎵</div>
+                <div class="stat-info">
+                    <div id="stat-music" class="stat-number">0</div>
+                    <div class="stat-label">Music</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon other">📦</div>
+                <div class="stat-info">
+                    <div id="stat-other" class="stat-number">0</div>
+                    <div class="stat-label">Other</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <button id="tab-config-btn" class="tab-btn active" onclick="switchTab('config')">Configuration</button>
+            <button id="tab-logs-btn" class="tab-btn" onclick="switchTab('logs')">Activity Log</button>
+            <button id="tab-tools-btn" class="tab-btn" onclick="switchTab('tools')">Tools</button>
+        </div>
+
+        <div class="tab-content-container">
+            <div id="tab-config" class="tab-content active">
+                
+                <div id="ffmpeg-warning" class="ffmpeg-alert hidden">
+                    <div style="font-size: 1.5rem;">⚠️</div>
+                    <div>
+                        <strong>FFmpeg Not Found!</strong><br>
+                        Music fingerprinting (AcoustID) requires FFmpeg. 
+                        <a href="https://ffmpeg.org/download.html" target="_blank">Download Here</a>.
+                    </div>
+                </div>
+
+                <div class="config-section">
+                    <h3>Directory Paths</h3>
+                    <div class="config-grid">
+                        <div class="input-group">
+                            <label>Monitor Folder</label>
+                            <div class="input-row">
+                                <input type="text" id="cfg-monitor" class="input-field" placeholder="C:\Downloads">
+                                <button onclick="browseFolder('monitor')" class="btn btn-secondary btn-small">Browse</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label>TV Shows</label>
+                            <div class="input-row">
+                                <input type="text" id="cfg-tv" class="input-field" placeholder="C:\Media\TV Shows">
+                                <button onclick="browseFolder('tv')" class="btn btn-secondary btn-small">Browse</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label>Movies</label>
+                            <div class="input-row">
+                                <input type="text" id="cfg-movie" class="input-field" placeholder="C:\Media\Movies">
+                                <button onclick="browseFolder('movie')" class="btn btn-secondary btn-small">Browse</button>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label>Music</label>
+                            <div class="input-row">
+                                <input type="text" id="cfg-music" class="input-field" placeholder="C:\Media\Music">
+                                <button onclick="browseFolder('music')" class="btn btn-secondary btn-small">Browse</button>
+                            </div>
+                        </div>
+                        <div class="input-group full-width">
+                            <label>Other/Unsorted</label>
+                            <div class="input-row">
+                                <input type="text" id="cfg-other" class="input-field" placeholder="C:\Media\Other">
+                                <button onclick="browseFolder('other')" class="btn btn-secondary btn-small">Browse</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="config-section">
+                    <h3>API Keys (Optional)</h3>
+                    <div class="config-grid">
+                        <div class="input-group">
+                            <div class="api-label-row">
+                                <label>TMDB API Key</label>
+                                <a href="https://www.themoviedb.org/settings/api" target="_blank" class="get-key-link">Get Key ↗</a>
+                            </div>
+                            <input type="password" id="cfg-api-key" class="input-field" placeholder="Enter TMDB key">
+                            <div class="help-text">For movie/TV metadata</div>
+                        </div>
+                        <div class="input-group">
+                            <div class="api-label-row">
+                                <label>AcoustID Key</label>
+                                <a href="https://acoustid.org/api-key" target="_blank" class="get-key-link">Get Key ↗</a>
+                            </div>
+                            <input type="password" id="cfg-acoustid-key" class="input-field" placeholder="Enter AcoustID key">
+                            <div class="help-text">For music fingerprinting</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="config-section">
+                    <div class="toggle-item">
+                        <div class="toggle-label">
+                            <h4>AI Correction</h4>
+                            <p>Use intelligent parsing and online APIs</p>
+                        </div>
+                        <div id="toggle-ai" class="toggle-switch active" onclick="toggleAI()">
+                            <div class="toggle-slider"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="config-actions">
+                    <button onclick="runMassImport()" class="btn btn-secondary">Mass Import</button>
+                    <div class="action-buttons">
+                        <button onclick="resetConfig()" class="btn btn-secondary">Reset</button>
+                        <button onclick="saveConfig()" class="btn btn-primary">Save Configuration</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="tab-logs" class="tab-content">
+                <div class="logs-header">
+                    <h3>Activity Log</h3>
+                    <button onclick="clearLogs()" class="btn btn-secondary">Clear Logs</button>
+                </div>
+                <div id="log-container" class="log-container">
+                    <div class="empty-log">
+                        <div>📝</div>
+                        <h4>No activity yet</h4>
+                        <p>Activity logs will appear here</p>
+                    </div>
+                </div>
+            </div>
+
+            <div id="tab-tools" class="tab-content">
+                <div class="tools-section">
+                    <h3>Parser Tester</h3>
+                    <div class="parser-tester">
+                        <input type="text" id="test-filename" class="input-field" placeholder="Game.of.Thrones.S01E01.1080p.x264.mkv">
+                        <button onclick="testParser()" class="btn btn-primary">Test Parser</button>
+                        <div id="parser-results" class="parser-results hidden">
+                            <div class="results-header">
+                                <h4>Parsing Results</h4>
+                                <button onclick="copyResults()" class="btn btn-secondary btn-small">Copy</button>
+                            </div>
+                            <pre id="parser-output"></pre>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="tools-section">
+                    <h3>System Information</h3>
+                    <div class="system-info">
+                        <div class="info-grid">
+                            <div class="info-item">
+                                <span class="info-label">Monitoring Status</span>
+                                <span id="sys-monitoring-status" class="info-value status-badge stopped">Stopped</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Missing Libraries</span>
+                                <span id="sys-missing-libs" class="info-value">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+
+    <script>
+        setTimeout(function() {
+            const loading = document.getElementById('loading-screen');
+            const app = document.getElementById('app');
+            if (loading && loading.style.display !== 'none') {
+                loading.style.display = 'none';
+                app.classList.remove('hidden');
+            }
+        }, 3000);
+    </script>
+
+    <script type="text/javascript" src="/eel.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>

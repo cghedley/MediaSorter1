@@ -1,533 +1,1044 @@
-import traceback
-import tkinter as tk
-from tkinter import messagebox
+﻿import eel
 import sys
+import os
+import time
+import re
+import shutil
+import json
+import threading
+import queue
+import subprocess
+from datetime import datetime
+from urllib.parse import quote
+from collections import OrderedDict
+import tkinter as tk 
+from tkinter import filedialog 
+import traceback
 
-# --- USER DETAILS ---
-# You can edit these details here
-APP_VERSION = "1.0"
-DEVELOPER_NAME = "Chris Hedley"
+# ===== EXE RESOURCE HANDLING =====
+# This ensures the 'web' folder is found whether running as .py or .exe
+def get_resource_path(relative_path):
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
-# WE WRAP EVERYTHING IN A TRY BLOCK TO CATCH STARTUP CRASHES
-try:
-    import os
-    import time
-    import re
-    import shutil
-    import json
-    import threading
-    from tkinter import filedialog, scrolledtext, ttk
-
-    # --- LIBRARIES CHECK ---
-    MISSING_LIBS = []
+# ===== WINDOWS PATH UTILITY =====
+def normalize_windows_path(path):
+    """Normalize Windows paths for cross-platform compatibility"""
+    if not path or not isinstance(path, str):
+        return ""
+    
+    # Convert to absolute path
     try:
-        from watchdog.observers import Observer
-        from watchdog.events import FileSystemEventHandler
-    except ImportError: MISSING_LIBS.append("watchdog")
+        path = os.path.abspath(path)
+    except:
+        return path
+    
+    # Replace forward slashes with backslashes for Windows
+    if sys.platform == "win32":
+        path = path.replace('/', '\\')
+    
+    return path
 
-    try:
-        from tmdbv3api import TMDb, Search, TV, Movie, Episode
-        TMDB_AVAILABLE = True
-    except ImportError: TMDB_AVAILABLE = False
+# ===== CONFIGURATION =====
+CONFIG_FILE = "sorter_config.json"
+STATS = {'tv': 0, 'movies': 0, 'music': 0, 'other': 0}
 
-    try:
-        import mutagen
-        from mutagen.easyid3 import EasyID3
-        MUTAGEN_AVAILABLE = True
-    except ImportError: MUTAGEN_AVAILABLE = False
-
-    try:
-        import acoustid
-        ACOUSTID_AVAILABLE = True
-    except ImportError: ACOUSTID_AVAILABLE = False
-
-    # --- CONFIGURATION ---
-    CONFIG_FILE = "sorter_config.json"
-
-    def load_config():
-        defaults = {
-            "monitor": "", "tv": "", "movie": "", "music": "", "other": "", 
-            "api_key": "", "acoustid_key": ""
-        }
-        if os.path.exists(CONFIG_FILE):
+def load_config():
+    defaults = {
+        "monitor": "", "tv": "", "movie": "", "music": "", "other": "", 
+        "api_key": "", "acoustid_key": "", "use_ai_correction": True
+    }
+    
+    config_path = os.path.abspath(CONFIG_FILE)
+    print(f"Loading config from: {config_path}")
+    
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding='utf-8') as f:
+                loaded = json.load(f)
+                # Normalize Windows paths
+                for key in ["monitor", "tv", "movie", "music", "other"]:
+                    if key in loaded and loaded[key]:
+                        loaded[key] = normalize_windows_path(loaded[key])
+                defaults.update(loaded)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            traceback.print_exc()
+            # Create a fresh config file
             try:
-                with open(CONFIG_FILE, "r") as f:
-                    defaults.update(json.load(f))
-            except: pass
-        return defaults
+                with open(config_path, "w", encoding='utf-8') as f:
+                    json.dump(defaults, f, indent=4)
+            except:
+                pass
+    else:
+        # Create config file if it doesn't exist
+        try:
+            with open(config_path, "w", encoding='utf-8') as f:
+                json.dump(defaults, f, indent=4)
+        except:
+            pass
+    
+    return defaults
 
-    def save_config(config_data):
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config_data, f, indent=4)
+def save_config_file(config_data):
+    # Normalize paths before saving
+    config_copy = config_data.copy()
+    for key in ["monitor", "tv", "movie", "music", "other"]:
+        if key in config_copy and config_copy[key]:
+            config_copy[key] = normalize_windows_path(config_copy[key])
+    
+    with open(CONFIG_FILE, "w", encoding='utf-8') as f:
+        json.dump(config_copy, f, indent=4)
 
-    # --- INTELLIGENCE LAYER ---
-    class MediaClassifier:
-        def __init__(self, tmdb_key=None, acoustid_key=None):
-            self.use_api = False
-            self.acoustid_key = acoustid_key
-            if TMDB_AVAILABLE and tmdb_key:
+# ===== LIBRARY & FFMPEG CHECKS =====
+MISSING_LIBS = []
+FFMPEG_AVAILABLE = False
+
+def check_ffmpeg():
+    """Checks if ffmpeg is available in the system PATH"""
+    try:
+        # Check if ffmpeg is in PATH
+        if shutil.which("ffmpeg"):
+            return True
+        # Fallback: try running it directly
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
+        return True
+    except:
+        return False
+
+FFMPEG_AVAILABLE = check_ffmpeg()
+
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+except ImportError: 
+    MISSING_LIBS.append("watchdog")
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError: 
+    MISSING_LIBS.append("requests")
+    REQUESTS_AVAILABLE = False
+
+try:
+    from tmdbv3api import TMDb, Search, TV, Movie, Episode
+    TMDB_AVAILABLE = True
+except ImportError: 
+    TMDB_AVAILABLE = False
+
+try:
+    import mutagen
+    from mutagen.easyid3 import EasyID3
+    MUTAGEN_AVAILABLE = True
+except ImportError: 
+    MUTAGEN_AVAILABLE = False
+
+try:
+    import acoustid
+    ACOUSTID_AVAILABLE = True
+except ImportError: 
+    ACOUSTID_AVAILABLE = False
+
+# ===== UTILITY FUNCTIONS =====
+def safe_path_join(base, *paths):
+    try:
+        final_path = os.path.abspath(os.path.join(base, *paths))
+        base_path = os.path.abspath(base)
+        if not final_path.startswith(base_path): 
+            return None
+        return final_path
+    except: 
+        return None
+
+# ===== INTELLIGENT PARSER =====
+class IntelligentParser:
+    def __init__(self):
+        self.patterns = {
+            "quality": ["1080p", "720p", "480p", "2160p", "4k", "hdr", "bluray", "web-dl", "webrip", "dvdrip", "hdtv"],
+            "codec": ["x264", "x265", "h264", "hevc", "aac", "ac3", "dts", "atmos", "truehd"],
+            "group": ["rarbg", "yify", "yts", "eztv", "psa", "tgx"],
+            "edition": ["extended", "unrated", "directors cut", "remastered"]
+        }
+
+    def clean_filename_aggressive(self, filename):
+        name = os.path.splitext(filename)[0]
+        name = name.replace('.', ' ').replace('_', ' ').replace('-', ' ')
+        
+        # Stop at Year
+        year_match = re.search(r'\b(19|20)\d{2}\b', name)
+        if year_match: 
+            name = name[:year_match.end()]
+            
+        # Strip patterns
+        for category in self.patterns.values():
+            for term in category:
+                name = re.sub(rf'\b{term}\b', '', name, flags=re.IGNORECASE)
+        
+        # Parentheses logic
+        def paren_handler(match):
+            content = match.group(1)
+            keep = [r'^\d{4}$', r'^US$', r'^UK$', r'^Extended$']
+            if any(re.match(p, content, re.IGNORECASE) for p in keep):
+                return f" ({content})"
+            return ""
+        
+        name = re.sub(r'\((.*?)\)', paren_handler, name)
+        name = re.sub(r'\[.*?\]', '', name)
+        return re.sub(r'\s+', ' ', name).strip()
+
+# ===== FREE API LAYER =====
+class FreeMetadataAPIs:
+    @staticmethod
+    def _safe_get(url, headers=None, retries=3):
+        if not REQUESTS_AVAILABLE: 
+            return None
+        for i in range(retries):
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200: 
+                    return res.json()
+                if res.status_code == 429: 
+                    time.sleep((i + 1) * 2)
+            except: 
+                time.sleep(1)
+        return None
+
+    @staticmethod
+    def tv_maze_search(query):
+        url = f"http://api.tvmaze.com/singlesearch/shows?q={quote(query)}"
+        data = FreeMetadataAPIs._safe_get(url)
+        if data:
+            return {
+                "name": data.get("name"), 
+                "year": data.get("premiered", "")[:4]
+            }
+        return None
+
+    @staticmethod
+    def musicbrainz_search(query):
+        headers = {"User-Agent": "MediaSorter/1.0"}
+        url = f"https://musicbrainz.org/ws/2/recording/?query={quote(query)}&fmt=json"
+        data = FreeMetadataAPIs._safe_get(url, headers)
+        if data and data.get("recordings"):
+            rec = data["recordings"][0]
+            return {
+                "title": rec.get("title"),
+                "artist": rec.get("artist-credit", [{}])[0].get("name", "Unknown")
+            }
+        return None
+
+# ===== MEDIA CLASSIFIER =====
+class MediaClassifier:
+    def __init__(self, config):
+        self.config = config
+        self.parser = IntelligentParser()
+        self.tmdb_key = config.get("api_key")
+        self.acoustid_key = config.get("acoustid_key")
+        
+        self.use_tmdb = False
+        if TMDB_AVAILABLE and self.tmdb_key:
+            try:
                 self.tmdb = TMDb()
-                self.tmdb.api_key = tmdb_key
+                self.tmdb.api_key = self.tmdb_key
+                self.tmdb.language = 'en'
                 self.search = Search()
                 self.episode_api = Episode()
-                self.use_api = True
+                self.use_tmdb = True
+            except Exception as e:
+                print(f"TMDB init failed: {e}")
 
-        def sanitize(self, name):
-            name = str(name).strip()
-            name = re.sub(r'[<>:"/\\|?*]', '', name)
-            return name.rstrip('.')
+    def sanitize(self, name):
+        name = str(name).strip()
+        name = re.sub(r'[<>:"/\\|?*]', '', name)
+        return name.rstrip('.')
 
-        def clean_final_name(self, text):
-            """Aggressively removes 'Scene' tags for the final filename."""
-            text = text.replace('.', ' ').replace('_', ' ')
-            junk_terms = [
-                r'\b(19|20)\d{2}\b', r'\bS\d+E\d+\b', r'\bS\d+\b', 
-                r'\b1080p\b', r'\b720p\b', r'\b480p\b', r'\b2160p\b', r'\b4k\b',
-                r'\bBluRay\b', r'\bWEB-DL\b', r'\bWEBRip\b', r'\bDVD\b', r'\bDVDRip\b',
-                r'\bHDR\b', r'\bHDR10\b', r'\bHEVC\b', r'\bx264\b', r'\bx265\b', r'\bH264\b', r'\bH265\b',
-                r'\bAAC\b', r'\bAC3\b', r'\bDTS\b', r'\bAtmos\b', r'\bTrueHD\b',
-                r'\bRARBG\b', r'\bYIFY\b', r'\bYTS\b', r'\bEZTV\b', r'\bPSA\b',
-                r'\bPROPER\b', r'\bREPACK\b', r'\bEXTENDED\b', r'\bUNRATED\b', r'\bDIRECTORS CUT\b',
-                r'\[.*?\]', r'\(.*?\)'
-            ]
-            for term in junk_terms:
-                text = re.sub(term, '', text, flags=re.IGNORECASE)
-            text = re.sub(r'\s+', ' ', text).strip()
-            return text
-
-        def get_tv_details(self, filename):
-            match = re.search(r'(?:s|season)\s?(\d{1,2})\s?(?:e|x|episode)\s?(\d{1,2})', filename, re.IGNORECASE)
-            if not match: match = re.search(r'(\d{1,2})x(\d{1,2})', filename, re.IGNORECASE)
-            
-            season_num = "01"
-            episode_num = "01"
+    def get_tv_details(self, filename):
+        clean_name = self.parser.clean_filename_aggressive(filename)
+        
+        season, episode = "01", "01"
+        patterns = [
+            r'(?:s|season)\s?(\d{1,2})\s?(?:e|x|episode)\s?(\d{1,2})',
+            r'(\d{1,2})x(\d{1,2})'
+        ]
+        
+        found_ep = False
+        for p in patterns:
+            match = re.search(p, filename, re.IGNORECASE)
             if match:
-                season_num = f"{int(match.group(1)):02d}"
-                episode_num = f"{int(match.group(2)):02d}"
+                season = f"{int(match.group(1)):02d}"
+                episode = f"{int(match.group(2)):02d}"
+                clean_name = re.sub(match.group(0), '', clean_name, flags=re.IGNORECASE).strip()
+                found_ep = True
+                break
+        
+        series_name, year, ep_title = clean_name, "", ""
 
-            series_name = "Unknown Series"
-            episode_title = ""
-            year = ""
-            
-            search_query = self.clean_final_name(filename)
-            
-            if self.use_api:
-                try:
-                    results = self.search.tv_shows({"query": search_query})
-                    if results:
-                        show = results[0]
-                        series_name = show.name
-                        if hasattr(show, 'first_air_date') and show.first_air_date:
-                            year = show.first_air_date.split('-')[0]
+        if self.config.get("use_ai_correction", True):
+            tv_data = FreeMetadataAPIs.tv_maze_search(series_name)
+            if tv_data:
+                series_name = tv_data.get("name", series_name)
+                year = tv_data.get("year", "")
+
+        if self.use_tmdb:
+            try:
+                results = self.search.tv_shows({"query": series_name})
+                if results:
+                    show = results[0]
+                    series_name = show.name
+                    if not year and hasattr(show, 'first_air_date') and show.first_air_date:
+                        year = show.first_air_date[:4]
+                    if found_ep:
                         try:
-                            ep_details = self.episode_api.details(show.id, int(season_num), int(episode_num))
-                            if hasattr(ep_details, 'name'):
-                                episode_title = ep_details.name
-                        except: pass
-                except: pass
+                            det = self.episode_api.details(show.id, int(season), int(episode))
+                            if hasattr(det, 'name'): 
+                                ep_title = det.name
+                        except: 
+                            pass
+            except: 
+                pass
+
+        return self.sanitize(series_name), year, season, episode, self.sanitize(ep_title)
+
+    def get_movie_details(self, filename):
+        clean_name = self.parser.clean_filename_aggressive(filename)
+        year = ""
+        
+        year_match = re.search(r'\b(19|20)\d{2}\b', clean_name)
+        if year_match:
+            year = year_match.group()
+            clean_name = clean_name.replace(year, '').strip(" ()")
+
+        if self.use_tmdb:
+            try:
+                results = self.search.movies({"query": clean_name, "year": year if year else None})
+                if results:
+                    m = results[0]
+                    clean_name = m.title
+                    if hasattr(m, 'release_date') and m.release_date: 
+                        year = m.release_date[:4]
+            except: 
+                pass
             
-            if series_name == "Unknown Series": 
-                series_name = search_query
+        return self.sanitize(clean_name), year
 
-            return self.sanitize(series_name), year, season_num, episode_num, self.sanitize(episode_title)
+    def get_music_details(self, file_path):
+        filename = os.path.basename(file_path)
+        artist, title, album = "Unknown Artist", os.path.splitext(filename)[0], "Unknown Album"
+        track, disc = "", ""
 
-        def get_movie_details(self, filename):
-            movie_name = self.clean_final_name(filename)
-            year = ""
-            if self.use_api:
-                try:
-                    results = self.search.movies({"query": movie_name})
-                    if results:
-                        top = results[0]
-                        movie_name = top.title
-                        if hasattr(top, 'release_date') and top.release_date:
-                            year = top.release_date.split('-')[0]
-                except: pass
-            return self.sanitize(movie_name), year
+        # Try AcoustID - Only if key exists AND ffmpeg is installed
+        if ACOUSTID_AVAILABLE and self.acoustid_key and FFMPEG_AVAILABLE:
+            try:
+                results = acoustid.match(self.acoustid_key, file_path)
+                for score, _, t_m, a_m in results:
+                    if score > 0.8:
+                        artist, title = a_m, t_m
+                        break
+            except Exception as e:
+                print(f"AcoustID error: {e}")
 
-        def get_music_details(self, file_path):
-            filename = os.path.basename(file_path)
-            tag_artist = "Unknown Artist"
-            tag_album = "Unknown Album"
-            tag_title = "Unknown Title"
-            track = ""
-            disc = ""
+        # Try mutagen
+        if MUTAGEN_AVAILABLE:
+            try:
+                f = mutagen.File(file_path, easy=True)
+                if f:
+                    artist = f.get('artist', [artist])[0]
+                    album = f.get('album', [album])[0]
+                    title = f.get('title', [title])[0]
+                    tr = f.get('tracknumber', [''])[0]
+                    if tr: 
+                        track = tr.split('/')[0].zfill(2)
+                    dn = f.get('discnumber', [''])[0]
+                    if dn: 
+                        disc = dn.split('/')[0]
+            except Exception as e:
+                print(f"Mutagen error: {e}")
 
-            fpcalc_path = "fpcalc.exe"
-            if getattr(sys, 'frozen', False):
-                fpcalc_path = os.path.join(sys._MEIPASS, "fpcalc.exe")
-            if os.path.exists(fpcalc_path):
-                os.environ["FPCALC"] = fpcalc_path
+        # Fallback to MusicBrainz
+        if artist == "Unknown Artist" and self.config.get("use_ai_correction", True):
+            clean = self.parser.clean_filename_aggressive(filename)
+            mb = FreeMetadataAPIs.musicbrainz_search(clean)
+            if mb: 
+                title, artist = mb.get("title", title), mb.get("artist", artist)
 
-            if MUTAGEN_AVAILABLE:
-                try:
-                    audio = mutagen.File(file_path, easy=True)
-                    if audio:
-                        tag_artist = audio.get('artist', [tag_artist])[0]
-                        tag_album = audio.get('album', [tag_album])[0]
-                        tag_title = audio.get('title', [os.path.splitext(filename)[0]])[0]
-                        tr = audio.get('tracknumber', [''])[0]
-                        if tr: track = tr.split('/')[0].zfill(2)
-                        dn = audio.get('discnumber', [''])[0]
-                        if dn: disc = dn.split('/')[0]
-                except: pass
+        return self.sanitize(artist), self.sanitize(album), self.sanitize(title), track, disc
 
-            needs_fingerprint = (tag_artist == "Unknown Artist" or tag_title == "Unknown Title")
-            if needs_fingerprint and ACOUSTID_AVAILABLE:
-                try:
-                    apikey = self.acoustid_key if self.acoustid_key else 'cSpUJKpD' 
-                    if shutil.which("fpcalc") or os.path.exists(fpcalc_path):
-                        results = acoustid.match(apikey, file_path)
-                        for score, recording_id, title_match, artist_match in results:
-                            if score > 0.8:
-                                tag_artist = artist_match if artist_match else tag_artist
-                                tag_title = title_match if title_match else tag_title
-                                break
-                except: pass
+# ===== PROCESSOR =====
+class Processor:
+    def __init__(self, config, log_callback, update_stat_callback):
+        self.config = config
+        self.log = log_callback
+        self.update_stat = update_stat_callback
+        self.classifier = MediaClassifier(config)
 
-            return self.sanitize(tag_artist), self.sanitize(tag_album), self.sanitize(tag_title), track, disc
-
-    # --- PROCESSING LOGIC ---
-    class Processor:
-        def __init__(self, config, log_callback):
-            self.config = config
-            self.log = log_callback
-            self.classifier = MediaClassifier(config.get("api_key"), config.get("acoustid_key"))
-
-        def process_file(self, file_path):
-            if not os.path.exists(file_path): return False
-            
-            filename = os.path.basename(file_path)
-            ext = os.path.splitext(filename)[1].lower()
-            
-            junk_exts = ['.txt', '.nfo', '.jpg', '.png', '.exe', '.srt', '.url', '.ini', '.db', '.sfv', '.part', '.crdownload', '.tmp']
-            if ext in junk_exts: return False
-
-            destination_root = None
-            final_path = None
-            log_category = "Unknown"
-
-            if ext in ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a']:
-                destination_root = self.config["music"]
-                if destination_root:
-                    artist, album, title, track, disc = self.classifier.get_music_details(file_path)
-                    prefix = ""
-                    if track:
-                        prefix = f"{disc}-{track}" if (disc and disc != "1") else track
-                    new_filename = f"{prefix} - {title}{ext}" if prefix else f"{artist} - {title}{ext}"
-                    final_path = os.path.join(destination_root, artist, album, new_filename)
-                    log_category = "Music"
-
-            elif ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v']:
-                is_tv = bool(re.search(r'(s\d{1,2}e\d{1,2})|(\d{1,2}x\d{1,2})', filename, re.IGNORECASE))
-                if is_tv:
-                    destination_root = self.config["tv"]
-                    if destination_root:
-                        name, year, season, episode, ep_title = self.classifier.get_tv_details(filename)
-                        folder_name = f"{name} ({year})" if year else name
-                        clean_ep_title = self.classifier.clean_final_name(ep_title) if ep_title else ""
-                        clean_series_name = self.classifier.clean_final_name(name)
-                        if clean_ep_title:
-                            new_filename = f"{clean_series_name} - S{season}E{episode} - {clean_ep_title}{ext}"
-                        else:
-                            new_filename = f"{clean_series_name} - S{season}E{episode}{ext}"
-                        final_path = os.path.join(destination_root, folder_name, new_filename)
-                        log_category = f"TV ({folder_name})"
-                else:
-                    destination_root = self.config["movie"]
-                    if destination_root:
-                        title, year = self.classifier.get_movie_details(filename)
-                        clean_title = self.classifier.clean_final_name(title)
-                        new_filename = f"{clean_title} ({year}){ext}" if year else f"{clean_title}{ext}"
-                        final_path = os.path.join(destination_root, new_filename)
-                        log_category = "Movie"
-
-            if not final_path:
-                destination_root = self.config["other"]
-                log_category = "Unsorted"
-                if destination_root:
-                    final_path = os.path.join(destination_root, filename)
-
-            if final_path and destination_root:
-                try:
-                    dest_dir = os.path.dirname(final_path)
-                    if not os.path.exists(dest_dir):
-                        os.makedirs(dest_dir)
-                    base, extension = os.path.splitext(final_path)
-                    counter = 1
-                    while os.path.exists(final_path):
-                        final_path = f"{base}_{counter}{extension}"
-                        counter += 1
-                    shutil.move(file_path, final_path)
-                    self.log(f"SORTED [{log_category}]: {os.path.basename(final_path)}")
-                    return True
-                except Exception as e:
-                    self.log(f"Error moving file: {e}")
-                    return False
+    def process_file(self, file_path):
+        if not os.path.exists(file_path): 
+            return False
+        
+        filename = os.path.basename(file_path)
+        ext = os.path.splitext(filename)[1].lower()
+        
+        # Ignore non-media files
+        ignore_exts = ['.txt', '.nfo', '.jpg', '.png', '.exe', '.url', '.db', '.part', '.tmp', '.crdownload']
+        if ext in ignore_exts: 
             return False
 
-    # --- MONITOR HANDLER ---
-    if "watchdog" not in MISSING_LIBS:
-        class MediaHandler(FileSystemEventHandler):
-            def __init__(self, processor, config):
-                self.processor = processor
-                self.config = config
-                self.processed_files = set()
+        final_path, log_cat, dest_root = None, "other", None
 
-            def on_created(self, event):
-                self._process_event(event)
+        try:
+            # MUSIC
+            if ext in ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a']:
+                dest_root = self.config.get("music", "")
+                if dest_root:
+                    art, alb, tit, trk, dsc = self.classifier.get_music_details(file_path)
+                    prefix = f"{dsc}-{trk}" if (trk and dsc and dsc != '1') else (trk if trk else "")
+                    new_name = f"{prefix} - {tit}{ext}" if prefix else f"{art} - {tit}{ext}"
+                    if dsc and dsc != "1":
+                        final_path = safe_path_join(dest_root, art, alb, f"Disc {dsc}", new_name)
+                    else:
+                        final_path = safe_path_join(dest_root, art, alb, new_name)
+                    log_cat = "music"
+
+            # VIDEO
+            elif ext in ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v']:
+                is_tv = bool(re.search(r'(s\d+|season)', filename, re.IGNORECASE))
+                if is_tv:
+                    dest_root = self.config.get("tv", "")
+                    if dest_root:
+                        nm, yr, s, e, t = self.classifier.get_tv_details(filename)
+                        folder = f"{nm} ({yr})" if yr else nm
+                        season_folder = f"Season {s}"
+                        new_name = f"{nm} - S{s}E{e} - {t}{ext}" if t else f"{nm} - S{s}E{e}{ext}"
+                        final_path = safe_path_join(dest_root, folder, season_folder, new_name)
+                        log_cat = "tv"
+                else:
+                    dest_root = self.config.get("movie", "")
+                    if dest_root:
+                        nm, yr = self.classifier.get_movie_details(filename)
+                        new_name = f"{nm} ({yr}){ext}" if yr else f"{nm}{ext}"
+                        final_path = safe_path_join(dest_root, new_name)
+                        log_cat = "movies"
+
+            # Fallback
+            if not final_path:
+                dest_root = self.config.get("other", "")
+                log_cat = "other"
+                if dest_root:
+                    final_path = safe_path_join(dest_root, filename)
+
+            # Move file
+            if final_path:
+                os.makedirs(os.path.dirname(final_path), exist_ok=True)
+                
+                # Handle duplicates
+                base, extension = os.path.splitext(final_path)
+                c = 1
+                while os.path.exists(final_path):
+                    final_path = f"{base}_{c}{extension}"
+                    c += 1
+                
+                shutil.move(file_path, final_path)
+                self.log(f"Moved: {os.path.basename(final_path)}", "success")
+                self.update_stat(log_cat)
+                return True
+            else:
+                self.log(f"No destination for: {filename}", "warning")
+
+        except Exception as e:
+            self.log(f"Error processing {filename}: {str(e)}", "error")
+        
+        return False
+
+# ===== CORE LOGIC =====
+class ProcessingQueue:
+    def __init__(self, max_cache=2000):
+        self.queue = queue.Queue(maxsize=5000)
+        self.lock = threading.Lock()
+        self.processed = OrderedDict()
+        self.max_cache = max_cache
+
+    def add_file(self, file_path):
+        with self.lock:
+            if file_path in self.processed:
+                if time.time() - self.processed[file_path] < 300: 
+                    return False
+                else: 
+                    del self.processed[file_path]
             
-            def on_moved(self, event):
-                if not event.is_directory: self._handle_file(event.dest_path)
-
-            def on_modified(self, event):
-                self._process_event(event)
-
-            def _process_event(self, event):
-                if event.is_directory: return
-                self._handle_file(event.src_path)
-
-            def _handle_file(self, file_path):
-                if file_path.endswith(('.tmp', '.crdownload', '.part')): return
-                if file_path in self.processed_files: return
-                for key in ["tv", "movie", "music", "other"]:
-                    dest = self.config.get(key)
-                    if dest and os.path.commonpath([file_path, dest]) == dest: return
-                threading.Thread(target=self.process_wrapper, args=(file_path,)).start()
-
-            def process_wrapper(self, file_path):
-                if self.wait_for_file_ready(file_path):
-                    if self.processor.process_file(file_path):
-                        self.processed_files.add(file_path)
-                        if len(self.processed_files) > 1000: self.processed_files.clear()
-                        self.clean_empty_folder(os.path.dirname(file_path))
-
-            def wait_for_file_ready(self, file_path):
-                retries = 0
-                max_retries = 30
-                while retries < max_retries:
-                    if not os.path.exists(file_path): return False
-                    try:
-                        os.rename(file_path, file_path)
-                        size_1 = os.path.getsize(file_path)
-                        time.sleep(1)
-                        size_2 = os.path.getsize(file_path)
-                        if size_1 == size_2 and size_1 > 0: return True
-                    except OSError: pass
-                    time.sleep(2)
-                    retries += 1
+            if len(self.processed) > self.max_cache:
+                while len(self.processed) > self.max_cache * 0.9: 
+                    self.processed.popitem(last=False)
+            
+            try:
+                self.queue.put(file_path, block=False)
+                self.processed[file_path] = time.time()
+                return True
+            except queue.Full: 
                 return False
 
-            def clean_empty_folder(self, folder_path):
-                monitor_root = os.path.abspath(self.config["monitor"])
-                if os.path.abspath(folder_path) == monitor_root: return
-                junk_exts = ['.txt', '.nfo', '.jpg', '.png', '.url', '.exe', '.srt', '.ini', '.db']
+class WorkerPool:
+    def __init__(self, processor, queue_manager, num_workers=2):
+        self.processor = processor
+        self.queue_manager = queue_manager
+        self.num_workers = num_workers
+        self.workers = []
+        self.running = False
+
+    def start(self):
+        self.running = True
+        for _ in range(self.num_workers):
+            t = threading.Thread(target=self._loop, daemon=True)
+            t.start()
+            self.workers.append(t)
+
+    def stop(self): 
+        self.running = False
+
+    def _loop(self):
+        while self.running:
+            try:
+                path = self.queue_manager.queue.get(timeout=1)
+                if self._stable(path):
+                    if self.processor.process_file(path):
+                        self._cleanup(os.path.dirname(path))
+                self.queue_manager.queue.task_done()
+            except queue.Empty: 
+                continue
+            except Exception as e:
+                print(f"Worker error: {e}")
+
+    def _stable(self, path, timeout=30):
+        start = time.time()
+        last_size, stable_count = -1, 0
+        while time.time() - start < timeout:
+            if not os.path.exists(path): 
+                return False
+            try:
+                size = os.path.getsize(path)
+                if size == last_size and size > 0: 
+                    stable_count += 1
+                else: 
+                    stable_count = 0
+                last_size = size
+                if stable_count >= 3:
+                    # Try to open to check if locked
+                    with open(path, 'ab'): 
+                        pass
+                    return True
+            except: 
+                stable_count = 0
+            time.sleep(1)
+        return False
+
+    def _cleanup(self, folder):
+        try:
+            junk = ['.txt', '.nfo', '.jpg', '.png', '.url', '.exe', '.srt']
+            if not self.processor.config.get("monitor"):
+                return
+            if os.path.abspath(folder) == os.path.abspath(self.processor.config["monitor"]): 
+                return
+            for f in os.listdir(folder):
+                if os.path.splitext(f)[1].lower() in junk:
+                    try: 
+                        os.remove(os.path.join(folder, f))
+                    except: 
+                        pass
+            if not os.listdir(folder): 
+                os.rmdir(folder)
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+
+class HeartbeatEngine:
+    def __init__(self, config, queue_manager, log_func):
+        self.config = config
+        self.queue_manager = queue_manager
+        self.log = log_func
+        self.running = False
+
+    def start(self):
+        if self.running: 
+            return
+        self.running = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def stop(self): 
+        self.running = False
+
+    def _run(self):
+        while self.running:
+            p = self.config.get("monitor")
+            if p and os.path.exists(p): 
+                self._scan(p)
+            for _ in range(10): 
+                if not self.running: 
+                    break
+                time.sleep(1)
+
+    def _scan(self, folder, depth=0):
+        if depth > 3: 
+            return
+        try:
+            for item in os.listdir(folder):
+                p = os.path.join(folder, item)
+                if os.path.isfile(p): 
+                    self.queue_manager.add_file(p)
+                elif os.path.isdir(p): 
+                    self._scan(p, depth+1)
+        except: 
+            pass
+
+# ===== CONTROLLER =====
+class MediaController:
+    def __init__(self):
+        self.config = load_config()
+        self.queue = None
+        self.workers = None
+        self.heartbeat = None
+        self.observer = None
+        self.monitoring = False
+        self.processor = None
+
+    def log(self, message, msg_type="info"):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{msg_type.upper()}] {message}")
+        try: 
+            eel.js_add_log(message, msg_type)
+        except: 
+            pass
+
+    def update_stat(self, category):
+        if category in STATS:
+            STATS[category] += 1
+            try: 
+                eel.js_update_stats(STATS['tv'], STATS['movies'], STATS['music'], STATS['other'])
+            except: 
+                pass
+
+    def start_monitoring(self):
+        if self.monitoring: 
+            return False
+        
+        self.config = load_config()
+        monitor_path = self.config.get("monitor", "")
+        if not monitor_path:
+            self.log("Monitor folder not configured", "error")
+            return False
+        
+        if not os.path.exists(monitor_path):
+            self.log(f"Monitor folder does not exist: {monitor_path}", "error")
+            return False
+
+        self.log("Starting monitoring...", "info")
+        
+        try:
+            self.queue = ProcessingQueue()
+            self.processor = Processor(self.config, self.log, self.update_stat)
+            
+            self.workers = WorkerPool(self.processor, self.queue)
+            self.workers.start()
+            
+            self.heartbeat = HeartbeatEngine(self.config, self.queue, self.log)
+            self.heartbeat.start()
+            
+            if "watchdog" not in MISSING_LIBS:
                 try:
-                    files = os.listdir(folder_path)
-                    if not files:
-                        os.rmdir(folder_path)
-                        return
-                    is_pure_junk = True
-                    for f in files:
-                        full_path = os.path.join(folder_path, f)
-                        if os.path.isdir(full_path):
-                            is_pure_junk = False
-                            break
-                        if os.path.splitext(f)[1].lower() not in junk_exts:
-                            is_pure_junk = False
-                            break
-                    if is_pure_junk:
-                        shutil.rmtree(folder_path)
-                except: pass
+                    from watchdog.observers import Observer
+                    from watchdog.events import FileSystemEventHandler
+                    
+                    class MediaHandler(FileSystemEventHandler):
+                        def __init__(self, queue, config): 
+                            self.q = queue
+                            self.c = config
+                        
+                        def on_created(self, e): 
+                            self._handle_event(e)
+                        
+                        def on_moved(self, e): 
+                            self._handle_event(e, True)
+                        
+                        def _handle_event(self, e, moved=False):
+                            if e.is_directory: 
+                                return
+                            p = e.dest_path if moved else e.src_path
+                            
+                            # Anti-loop
+                            for key in ["tv", "movie", "music", "other"]:
+                                d = self.c.get(key)
+                                if d and os.path.commonpath([os.path.abspath(p), os.path.abspath(d)]) == os.path.abspath(d): 
+                                    return
 
-    # --- GUI ---
-    class SorterApp:
-        def __init__(self, root):
-            self.root = root
-            self.root.title("Media Sorter (Plex Ready)")
-            self.root.geometry("600x780")
+                            if not p.endswith('.tmp'): 
+                                self.q.add_file(p)
+                    
+                    self.observer = Observer()
+                    handler = MediaHandler(self.queue, self.config)
+                    self.observer.schedule(handler, monitor_path, recursive=True)
+                    self.observer.start()
+                    self.log("File system observer started", "success")
+                except Exception as e:
+                    self.log(f"Watchdog error: {e}", "warning")
+            else:
+                self.log("Watchdog not available - using periodic scanning", "warning")
             
-            if MISSING_LIBS:
-                messagebox.showerror("Missing Libraries", f"Missing:\n{', '.join(MISSING_LIBS)}\n\nRun: pip install watchdog tmdbv3api mutagen pyacoustid")
-                root.destroy()
-                return
-
-            self.config = load_config()
-            self.observer = None
-            self.processor = None
-
-            # HEADER
-            header = tk.Frame(root)
-            header.pack(pady=10)
-            tk.Label(header, text="Ultimate Media Organiser", font=("Segoe UI", 16, "bold")).pack()
-            tk.Label(header, text=f"v{APP_VERSION} | Dev: {DEVELOPER_NAME}", font=("Segoe UI", 8), fg="gray").pack()
-
-            # Warnings
-            fpcalc_path = "fpcalc.exe"
-            if getattr(sys, 'frozen', False):
-                fpcalc_path = os.path.join(sys._MEIPASS, "fpcalc.exe")
-                
-            if not TMDB_AVAILABLE:
-                tk.Label(root, text="Warning: 'tmdbv3api' missing", fg="orange").pack()
-            if not MUTAGEN_AVAILABLE:
-                tk.Label(root, text="Warning: 'mutagen' missing", fg="red").pack()
-            if not ACOUSTID_AVAILABLE:
-                tk.Label(root, text="Warning: 'pyacoustid' missing", fg="red").pack()
-            if ACOUSTID_AVAILABLE and not (shutil.which("fpcalc") or os.path.exists(fpcalc_path)):
-                tk.Label(root, text="Warning: 'fpcalc.exe' not found!", fg="red").pack()
-
-            # Keys Frame
-            key_frame = tk.Frame(root)
-            key_frame.pack(fill="x", padx=20, pady=5)
+            self.monitoring = True
+            self.log(f"Monitoring started on: {monitor_path}", "success")
             
-            tk.Label(key_frame, text="TMDB Key:", width=12, anchor="w").grid(row=0, column=0, sticky="w")
-            self.api_var = tk.StringVar(value=self.config.get("api_key", ""))
-            tk.Entry(key_frame, textvariable=self.api_var).grid(row=0, column=1, sticky="ew")
-
-            tk.Label(key_frame, text="AcoustID Key:", width=12, anchor="w").grid(row=1, column=0, sticky="w")
-            self.acoustid_var = tk.StringVar(value=self.config.get("acoustid_key", ""))
-            tk.Entry(key_frame, textvariable=self.acoustid_var).grid(row=1, column=1, sticky="ew")
+            # Initial sweep
+            threading.Thread(target=self._initial_sweep, daemon=True).start()
+            return True
             
-            key_frame.columnconfigure(1, weight=1)
+        except Exception as e:
+            self.log(f"Failed to start monitoring: {e}", "error")
+            return False
 
-            # Folders
-            self.path_vars = {}
-            paths_frame = tk.Frame(root)
-            paths_frame.pack(fill="x", padx=20, pady=10)
-
-            labels = {
-                "monitor": "Inbound Monitor",
-                "tv": "TV Destination",
-                "movie": "Movie Destination",
-                "music": "Music Destination",
-                "other": "Other/Unsorted"
-            }
-
-            for key, text in labels.items():
-                row = tk.Frame(paths_frame)
-                row.pack(fill="x", pady=5)
-                tk.Label(row, text=text, width=25, anchor="w").pack(side="left")
-                var = tk.StringVar(value=self.config.get(key, ""))
-                self.path_vars[key] = var
-                tk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True, padx=5)
-                ttk.Button(row, text="Browse", command=lambda k=key: self.browse_folder(k)).pack(side="left")
-
-            # Controls
-            tk.Label(root, text="Live Monitoring", font=("Segoe UI", 10, "bold")).pack(pady=(20, 5))
-            monitor_frame = tk.Frame(root)
-            monitor_frame.pack()
-            self.btn_start = ttk.Button(monitor_frame, text="Start Watching", command=self.start_monitoring)
-            self.btn_start.pack(side="left", padx=5)
-            self.btn_stop = ttk.Button(monitor_frame, text="Stop Watching", command=self.stop_monitoring, state="disabled")
-            self.btn_stop.pack(side="left", padx=5)
-
-            tk.Label(root, text="Manual Operations", font=("Segoe UI", 10, "bold")).pack(pady=(20, 5))
-            mass_frame = tk.Frame(root)
-            mass_frame.pack()
-            self.btn_mass = ttk.Button(mass_frame, text="Select Folder & Import All", command=self.run_mass_import)
-            self.btn_mass.pack(side="left", padx=20)
-            
-            # ABOUT BUTTON (NEW)
-            self.btn_about = ttk.Button(mass_frame, text="About / Help", command=self.show_about)
-            self.btn_about.pack(side="left", padx=5)
-
-            # Log
-            self.log_area = scrolledtext.ScrolledText(root, height=8, state='disabled')
-            self.log_area.pack(fill="both", expand=True, padx=20, pady=(20, 10))
-
-            # Attribution
-            attribution_frame = tk.Frame(root)
-            attribution_frame.pack(side="bottom", pady=10)
-            tk.Label(attribution_frame, text="POWERED BY TMDB & ACOUSTID", font=("Segoe UI", 10, "bold"), fg="#0d253f").pack()
-            tk.Label(attribution_frame, text="This product uses the TMDB API but is not endorsed or certified by TMDB.", font=("Segoe UI", 8), fg="gray").pack()
-
-        def browse_folder(self, key):
-            folder = filedialog.askdirectory()
-            if folder:
-                self.path_vars[key].set(folder)
-                self.save_current_config()
-
-        def save_current_config(self):
-            for k, v in self.path_vars.items():
-                self.config[k] = v.get()
-            self.config["api_key"] = self.api_var.get()
-            self.config["acoustid_key"] = self.acoustid_var.get()
-            save_config(self.config)
-
-        def log(self, message):
-            self.root.after(0, lambda: self._log(message))
-
-        def _log(self, message):
-            self.log_area.config(state='normal')
-            self.log_area.insert(tk.END, message + "\n")
-            self.log_area.see(tk.END)
-            self.log_area.config(state='disabled')
-
-        def show_about(self):
-            info = (
-                f"Media Organiser v{APP_VERSION}\n"
-                f"Developer: {DEVELOPER_NAME}\n\n"
-                "--- HOW TO USE ---\n"
-                "1. SETUP: Enter your TMDB and AcoustID keys for full features.\n"
-                "2. FOLDERS: Select your 'Inbound Monitor' (Downloads) and where you want files moved to.\n\n"
-                "--- MODES ---\n"
-                "LIVE MONITORING: Runs in the background. Any file saved or dragged into 'Inbound' is instantly sorted.\n\n"
-                "MASS IMPORT: Select an existing folder (e.g. USB drive). The tool will process ALL files inside it.\n"
-            )
-            messagebox.showinfo("About / Help", info)
-
-        def start_monitoring(self):
-            self.save_current_config()
-            if not self.config.get("monitor"):
-                messagebox.showerror("Error", "Select a Monitored Folder.")
-                return
-
-            self.processor = Processor(self.config, self.log)
-            handler = MediaHandler(self.processor, self.config)
-            self.observer = Observer()
-            self.observer.schedule(handler, self.config["monitor"], recursive=True)
-            self.observer.start()
-            
-            self.btn_start.config(state="disabled")
-            self.btn_stop.config(state="normal")
-            self.log("--- Live Monitoring Started ---")
-
-        def stop_monitoring(self):
-            if self.observer:
+    def stop_monitoring(self):
+        if not self.monitoring:
+            return
+        
+        self.log("Stopping monitoring...", "warning")
+        
+        if self.observer:
+            try:
                 self.observer.stop()
                 self.observer.join()
-                self.observer = None
-            self.btn_start.config(state="normal")
-            self.btn_stop.config(state="disabled")
-            self.log("--- Live Monitoring Stopped ---")
+                self.log("File system observer stopped", "info")
+            except:
+                pass
+        
+        if self.heartbeat:
+            self.heartbeat.stop()
+        
+        if self.workers:
+            self.workers.stop()
+        
+        self.monitoring = False
+        self.log("Monitoring stopped", "warning")
 
-        def run_mass_import(self):
-            self.save_current_config()
-            source_folder = filedialog.askdirectory(title="Select Folder to Import From")
-            if not source_folder: return
-            
-            if messagebox.askyesno("Confirm Import", "This will move and rename ALL media files. Continue?"):
-                self.log(f"--- Starting Mass Import from: {source_folder} ---")
-                threading.Thread(target=self._mass_import_thread, args=(source_folder,)).start()
-
-        def _mass_import_thread(self, source_folder):
-            processor = Processor(self.config, self.log)
-            count = 0
-            for root, dirs, files in os.walk(source_folder):
+    def _initial_sweep(self):
+        folder = self.config.get("monitor")
+        if not folder or not os.path.exists(folder): 
+            return
+        count = 0
+        try:
+            for root, _, files in os.walk(folder):
                 for file in files:
-                    if processor.process_file(os.path.join(root, file)): count += 1
-            self.log(f"--- Mass Import Complete: {count} files processed ---")
-            messagebox.showinfo("Complete", f"Processed {count} files.")
+                    if self.queue.add_file(os.path.join(root, file)): 
+                        count += 1
+            if count > 0:
+                self.log(f"Initial sweep queued {count} files", "info")
+        except Exception as e:
+            self.log(f"Sweep error: {e}", "error")
 
-    if __name__ == "__main__":
+# ===== GLOBAL CONTROLLER =====
+controller = MediaController()
+
+# ===== EEL EXPOSED FUNCTIONS =====
+@eel.expose
+def get_config():
+    return controller.config
+
+@eel.expose
+def get_initial_data():
+    return {
+        "config": controller.config,
+        "stats": STATS,
+        "is_monitoring": controller.monitoring,
+        "missing_libs": MISSING_LIBS,
+        "ffmpeg_installed": FFMPEG_AVAILABLE
+    }
+
+@eel.expose
+def save_config_from_js(data):
+    try:
+        controller.config.update(data)
+        save_config_file(controller.config)
+        return {"success": True, "message": "Configuration saved"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+@eel.expose
+def select_folder():
+    try:
         root = tk.Tk()
-        SorterApp(root)
-        root.mainloop()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        folder = filedialog.askdirectory()
+        root.destroy()
+        return normalize_windows_path(folder) if folder else ""
+    except:
+        return ""
 
-# --- ERROR CATCHING BLOCK ---
-except Exception as e:
-    root = tk.Tk()
-    root.withdraw()
-    error_msg = traceback.format_exc()
-    messagebox.showerror("Startup Error", f"The programme failed to start.\n\nError Details:\n{error_msg}")
-    root.destroy()
+@eel.expose
+def start_monitoring():
+    try:
+        success = controller.start_monitoring()
+        return {"success": success, "is_monitoring": controller.monitoring}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@eel.expose
+def stop_monitoring():
+    try:
+        controller.stop_monitoring()
+        return {"success": True, "is_monitoring": controller.monitoring}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@eel.expose
+def run_mass_import():
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        folder = filedialog.askdirectory()
+        root.destroy()
+        
+        if folder and os.path.exists(folder):
+            def mass_worker():
+                count = 0
+                proc = Processor(controller.config, controller.log, controller.update_stat)
+                for root, _, files in os.walk(folder):
+                    for file in files:
+                        if proc.process_file(os.path.join(root, file)): 
+                            count += 1
+                controller.log(f"Mass import finished. Moved {count} files.", "success")
+                eel.js_show_toast(f"Import Complete: {count} files", "success")
+            
+            threading.Thread(target=mass_worker, daemon=True).start()
+            return {"success": True, "message": f"Starting mass import from {folder}"}
+        else:
+            return {"success": False, "message": "No folder selected"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+@eel.expose
+def test_parser(filename):
+    try:
+        parser = IntelligentParser()
+        classifier = MediaClassifier(controller.config)
+        
+        clean = parser.clean_filename_aggressive(filename)
+        
+        # Test TV detection
+        is_tv = bool(re.search(r'(s\d+|season)', filename, re.IGNORECASE))
+        result = {"original": filename, "cleaned": clean, "is_tv": is_tv}
+        
+        if is_tv:
+            name, year, season, episode, title = classifier.get_tv_details(filename)
+            result.update({
+                "type": "tv",
+                "series_name": name,
+                "year": year,
+                "season": season,
+                "episode": episode,
+                "episode_title": title
+            })
+        else:
+            name, year = classifier.get_movie_details(filename)
+            result.update({
+                "type": "movie",
+                "movie_name": name,
+                "year": year
+            })
+        
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+# ===== TEST FUNCTION =====
+@eel.expose
+def test_connection():
+    return "Python backend is working!"
+
+# ===== WINDOWS BROWSER DETECTION =====
+def get_windows_browser():
+    """Get the best available browser on Windows"""
+    browsers = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "chrome",  # Try PATH
+        "msedge",  # Try PATH
+        "default"  # System default
+    ]
+    
+    for browser in browsers:
+        if browser == "default":
+            return browser
+        if browser in ["chrome", "msedge"]:
+            try:
+                if shutil.which(browser):
+                    return browser
+            except:
+                continue
+        else:
+            if os.path.exists(browser):
+                return browser
+    
+    return None
+
+# ===== SIMPLIFIED MAIN =====
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Media Sorter Pro - Starting...")
+    print(f"Python version: {sys.version}")
+    print(f"Platform: {sys.platform}")
+    print(f"Current directory: {os.getcwd()}")
+    print("=" * 60)
+    
+    # Ensure web directory exists
+    web_dir = get_resource_path('web')
+    web_dir = os.path.abspath(web_dir)
+    
+    print(f"Web directory: {web_dir}")
+    
+    if not os.path.exists(web_dir):
+        print(f"Creating web directory: {web_dir}")
+        os.makedirs(web_dir, exist_ok=True)
+    
+    # Check for required HTML files
+    index_path = os.path.join(web_dir, 'index.html')
+    if not os.path.exists(index_path):
+        print(f"WARNING: index.html not found at {index_path}")
+        print("Creating placeholder HTML file...")
+        try:
+            with open(index_path, 'w', encoding='utf-8') as f:
+                f.write("""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Media Sorter Pro</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 40px; 
+            background: #0a0a0f; 
+            color: white; 
+        }
+        .container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            text-align: center; 
+            padding: 40px; 
+        }
+        .spinner { 
+            border: 5px solid #333; 
+            border-top: 5px solid #6366f1; 
+            border-radius: 50%; 
+            width: 50px; 
+            height: 50px; 
+            animation: spin 1s linear infinite; 
+            margin: 20px auto; 
+        }
+        @keyframes spin { 
+            0% { transform: rotate(0deg); } 
+            100% { transform: rotate(360deg); } 
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Media Sorter Pro</h1>
+        <div class="spinner"></div>
+        <p>Loading application...</p>
+        <p>If this message persists, check if index.html exists in the web folder.</p>
+    </div>
+    <script type="text/javascript" src="/eel.js"></script>
+    <script>
+        setTimeout(() => location.reload(), 2000);
+    </script>
+</body>
+</html>""")
+            print("✓ Created placeholder index.html")
+        except Exception as e:
+            print(f"✗ Failed to create index.html: {e}")
+    
+    try:
+        # Initialize Eel
+        print("Initializing Eel...")
+        eel.init(web_dir)
+        print("✓ Eel initialized successfully")
+    except Exception as e:
+        print(f"✗ Eel initialization failed: {e}")
+        traceback.print_exc()
+        input("\nPress Enter to exit...")
+        sys.exit(1)
+    
+    try:
+        # Configure browser for Windows
+        mode = 'chrome'  # Default mode
+        
+        if sys.platform == "win32":
+            browser = get_windows_browser()
+            if browser:
+                print(f"Using browser: {browser}")
+                if browser.endswith('.exe'):
+                    mode = browser  # Use full path
+                else:
+                    mode = browser
+            else:
+                mode = None  # Let Eel use default
+                print("Using default system browser")
+        
+        # Get available port
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        
+        print(f"\n" + "=" * 60)
+        print(f"Starting web server on: http://127.0.0.1:{port}")
+        print(f"Browser mode: {mode}")
+        print("=" * 60 + "\n")
+        
+        # SIMPLIFIED startup - remove problematic parameters
+        print("Starting web interface...")
+        
+        # Start with minimal parameters
+        eel.start(
+            'index.html',
+            host='127.0.0.1',
+            port=port,
+            mode=mode,
+            size=(1200, 800)
+        )
+        
+    except (SystemExit, KeyboardInterrupt):
+        print("\n" + "=" * 60)
+        print("Graceful shutdown requested...")
+        print("=" * 60)
+        if controller and controller.monitoring:
+            controller.stop_monitoring()
+        sys.exit(0)
+        
+    except Exception as e:
+        print(f"\n" + "=" * 60)
+        print(f"FATAL ERROR: {e}")
+        print("=" * 60)
+        traceback.print_exc()
+        
+        # Try ultra-simple fallback
+        print("\nTrying ultra-simple startup...")
+        try:
+            eel.start('index.html', mode=None, port=0, host='localhost')
+        except Exception as e2:
+            print(f"Simple startup also failed: {e2}")
+            
+            # Try manual access
+            print(f"\nYou can try accessing manually at: http://127.0.0.1:{port}")
+            print("Or try running with a different browser:")
+            print("  python MediaSorter.py --mode=edge")
+            print("  python MediaSorter.py --mode=chrome")
+            print("  python MediaSorter.py --mode=default")
+        
+        # Keep console open
+        try:
+            input("\nPress Enter to exit...")
+        except:
+            pass
+        
+        sys.exit(1)
